@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Carl Leonardsson
+/* Copyright (C) 2014-2017 Carl Leonardsson
  *
  * This file is part of Nidhugg.
  *
@@ -21,6 +21,7 @@
 
 #include "Configuration.h"
 #include "DPORDriver.h"
+#include "GlobalContext.h"
 #include "Transform.h"
 
 #include <llvm/Support/CommandLine.h>
@@ -29,6 +30,11 @@
 #include <iostream>
 #include <set>
 #include <stdexcept>
+
+llvm::cl::opt<std::string>
+cl_transform("transform",llvm::cl::init(""),
+             llvm::cl::desc("Transform the input module and store it (as LLVM assembly) to OUTFILE."),
+             llvm::cl::NotHidden,llvm::cl::value_desc("OUTFILE"));
 
 void print_version(){
   std::cout << PACKAGE_STRING
@@ -42,7 +48,12 @@ void print_version(){
             << "Release"
 #endif
             << ", with LLVM-" << LLVM_VERSION << ":" << LLVM_BUILDMODE << ")\n";
-};
+}
+
+// Normal exit code
+#define EXIT_OK 0
+// Exit code when verification failed (an error was detected)
+#define VERIFICATION_FAILURE 42
 
 int main(int argc, char *argv[]){
   /* Command line options */
@@ -55,8 +66,13 @@ int main(int argc, char *argv[]){
       {"version"};
     visible_options.insert(Configuration::commandline_opts().begin(),
                            Configuration::commandline_opts().end());
+#ifdef LLVM_CL_GETREGISTEREDOPTIONS_TAKES_ARGUMENT
     llvm::StringMap<llvm::cl::Option*> opts;
     llvm::cl::getRegisteredOptions(opts);
+#else
+    llvm::StringMap<llvm::cl::Option*> &opts =
+      llvm::cl::getRegisteredOptions();
+#endif
     for(auto it = opts.begin(); it != opts.end(); ++it){
       if(visible_options.count(it->getKey()) == 0){
         it->getValue()->setHiddenFlag(llvm::cl::Hidden);
@@ -64,18 +80,16 @@ int main(int argc, char *argv[]){
     }
   }
   llvm::cl::opt<std::string>
-  input_file(llvm::cl::desc("<input bitcode or assembly>"),
-             llvm::cl::Positional,
-             llvm::cl::init("-"));
-  llvm::cl::opt<std::string>
-    cl_transform("transform",llvm::cl::init(""),
-                 llvm::cl::desc("Transform the input module and store it (as LLVM assembly) to OUTFILE."),
-                 llvm::cl::NotHidden,llvm::cl::value_desc("OUTFILE"));
+    input_file(llvm::cl::desc("<input bitcode or assembly>"),
+               llvm::cl::Positional,
+               llvm::cl::init("-"));
   llvm::cl::ParseCommandLineOptions(argc, argv);
 
+  bool errors_detected = false;
   try{
     Configuration conf;
     conf.assign_by_commandline();
+    conf.check_commandline();
 
     if(cl_transform != ""){
       Transform::transform(input_file,cl_transform,conf);
@@ -87,26 +101,30 @@ int main(int argc, char *argv[]){
       DPORDriver::Result res = driver->run();
       std::cout << "Trace count: " << res.trace_count
                 << " (also " << res.sleepset_blocked_trace_count
-                << " sleepset blocked)" << std::endl; 
+                << " sleepset blocked)" << std::endl;
       if(res.has_errors()){
-        std::cout << "\n Error detected:" << std::endl
-                  << res.error_trace.computation_to_string(2);
+        errors_detected = true;
+        std::cout << "\n Error detected:\n"
+                  << res.error_trace->to_string(2);
       }else{
         std::cout << "No errors were detected." << std::endl;
       }
 
       delete driver;
     }
+    GlobalContext::destroy();
     llvm::llvm_shutdown();
   }catch(std::exception *exc){
     std::cerr << "Error: " << exc->what() << "\n";
+    GlobalContext::destroy();
     llvm::llvm_shutdown();
     return 1;
   }catch(std::exception &exc){
     std::cerr << "Error: " << exc.what() << "\n";
+    GlobalContext::destroy();
     llvm::llvm_shutdown();
     return 1;
   }
 
-  return 0;
+  return (errors_detected ? VERIFICATION_FAILURE : EXIT_OK);
 }

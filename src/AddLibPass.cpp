@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Carl Leonardsson
+/* Copyright (C) 2014-2017 Carl Leonardsson
  *
  * This file is part of Nidhugg.
  *
@@ -42,7 +42,7 @@
 #include <stdexcept>
 
 void AddLibPass::getAnalysisUsage(llvm::AnalysisUsage &AU) const{
-};
+}
 
 bool AddLibPass::optAddFunction(llvm::Module &M,
                                 std::string name,
@@ -58,32 +58,42 @@ bool AddLibPass::optAddFunction(llvm::Module &M,
       return false;
     }
   }
+#ifdef LLVM_LINKER_CTOR_PARAM_MODULE_REFERENCE
+  llvm::Linker lnk(M);
+#else
   llvm::Linker lnk(&M);
+#endif
   std::string err;
   bool added_def = false;
   for(auto it = srces.begin(); !added_def && it != srces.end(); ++it){
-    std::string src = *it;
+    std::string src = StrModule::portasm(*it);
     llvm::Module *M2 = StrModule::read_module_src(src);
 
     if(!tgtTy || M2->getFunction(name)->getType() == tgtTy){
-#ifdef LLVM_LINKER_LINKINMODULE_HAS_MODE
-      if(lnk.linkInModule(M2,llvm::Linker::DestroySource,&err)){
-#else
+#ifdef LLVM_LINKER_LINKINMODULE_PTR_BOOL
       if(lnk.linkInModule(M2)){
+#elif defined LLVM_LINKER_LINKINMODULE_UNIQUEPTR_BOOL
+      if(lnk.linkInModule(std::unique_ptr<llvm::Module>(M2))){
+#else
+      if(lnk.linkInModule(M2,llvm::Linker::DestroySource,&err)){
 #endif
+#ifndef LLVM_LINKER_LINKINMODULE_UNIQUEPTR_BOOL
         delete M2;
+#endif
         throw std::logic_error("Failed to link in library code: "+err);
       }
       added_def = true;
     }
+#ifndef LLVM_LINKER_LINKINMODULE_UNIQUEPTR_BOOL
     delete M2;
+#endif
   }
   if(!added_def){
     Debug::warn("AddLibPass:"+name)
       << "WARNING: Failed to add library function definition for function " << name << "\n";
   }
   return added_def;
-};
+}
 
 bool AddLibPass::optNopFunction(llvm::Module &M,
                                 std::string name){
@@ -107,7 +117,7 @@ bool AddLibPass::optNopFunction(llvm::Module &M,
     llvm::BasicBlock::Create(F->getContext(),"",F);
   llvm::ReturnInst::Create(F->getContext(),rv,B);
   return true;
-};
+}
 
 bool AddLibPass::optConstIntFunction(llvm::Module &M,
                                      std::string name,
@@ -126,7 +136,7 @@ bool AddLibPass::optConstIntFunction(llvm::Module &M,
     llvm::BasicBlock::Create(F->getContext(),"",F);
   llvm::ReturnInst::Create(F->getContext(),rv,B);
   return true;
-};
+}
 
 bool AddLibPass::runOnModule(llvm::Module &M){
   optNopFunction(M,"fclose");
@@ -190,7 +200,7 @@ head:
   br i1 %ncmp, label %body, label %exit
 body:
   %nnext = sub i32 %n, 1
-  %scur = getelementptr i8* %m, i32 %nnext
+  %scur = getelementptr i8, i8* %m, i32 %nnext
   store i8 0, i8* %scur
   br label %head
 exit:
@@ -210,14 +220,14 @@ entry:
 head:
   %s1 = phi i8* [ %p1, %entry ], [ %s1next, %body ]
   %s2 = phi i8* [ %p2, %entry ], [ %s2next, %body ]
-  %a = load i8* %s1, align 1
-  %b = load i8* %s2, align 1
+  %a = load i8, i8* %s1, align 1
+  %b = load i8, i8* %s2, align 1
   %a0 = icmp eq i8 %a, 0
   br i1 %a0, label %exit, label %body
 
 body:
-  %s1next = getelementptr inbounds i8* %s1, i64 1
-  %s2next = getelementptr inbounds i8* %s2, i64 1
+  %s1next = getelementptr inbounds i8, i8* %s1, i64 1
+  %s2next = getelementptr inbounds i8, i8* %s2, i64 1
   %abeq = icmp eq i8 %a, %b
   br i1 %abeq, label %head, label %exit
 
@@ -235,14 +245,14 @@ entry:
 head:
   %s1 = phi i8* [ %p1, %entry ], [ %s1next, %body ]
   %s2 = phi i8* [ %p2, %entry ], [ %s2next, %body ]
-  %a = load i8* %s1, align 1
-  %b = load i8* %s2, align 1
+  %a = load i8, i8* %s1, align 1
+  %b = load i8, i8* %s2, align 1
   %a0 = icmp eq i8 %a, 0
   br i1 %a0, label %exit, label %body
 
 body:
-  %s1next = getelementptr inbounds i8* %s1, i64 1
-  %s2next = getelementptr inbounds i8* %s2, i64 1
+  %s1next = getelementptr inbounds i8, i8* %s1, i64 1
+  %s2next = getelementptr inbounds i8, i8* %s2, i64 1
   %abeq = icmp eq i8 %a, %b
   br i1 %abeq, label %head, label %exit
 
@@ -268,7 +278,7 @@ head:
   br i1 %ncmp, label %body, label %exit
 body:
   %nnext = sub i64 %n, 1
-  %scur = getelementptr i8* %s, i64 %nnext
+  %scur = getelementptr i8, i8* %s, i64 %nnext
   store i8 %c, i8* %scur
   br label %head
 exit:
@@ -285,7 +295,7 @@ head:
   br i1 %ncmp, label %body, label %exit
 body:
   %nnext = sub i32 %n, 1
-  %scur = getelementptr i8* %s, i32 %nnext
+  %scur = getelementptr i8, i8* %s, i32 %nnext
   store i8 %c, i8* %scur
   br label %head
 exit:
@@ -301,7 +311,7 @@ head:
   br i1 %ncmp, label %body, label %exit
 body:
   %nnext = sub i64 %n, 1
-  %scur = getelementptr i8* %s, i64 %nnext
+  %scur = getelementptr i8, i8* %s, i64 %nnext
   store i8 %c, i8* %scur
   br label %head
 exit:
@@ -317,15 +327,66 @@ head:
   br i1 %ncmp, label %body, label %exit
 body:
   %nnext = sub i32 %n, 1
-  %scur = getelementptr i8* %s, i32 %nnext
+  %scur = getelementptr i8, i8* %s, i32 %nnext
   store i8 %c, i8* %scur
   br label %head
 exit:
   ret i8* %s
 }
 )"});
+  /************************
+   *        puts          *
+   ************************/
+  /* Figure out signature of putchar */
+  std::string putchar_ret_ty = "i32";
+  std::string putchar_arg_ty = "i32";
+  std::string putchar_decl = "declare i32 @putchar(i32)";
+  std::string print_newline =
+    "call "+putchar_ret_ty+" @putchar("+putchar_arg_ty+" 10)";
+  /* Define puts */
+  optAddFunction(M,"puts",{
+      R"(
+define i32 @puts(i8* %s){
+entry:
+  br label %head
+head:
+  %i = phi i32 [0, %entry], [%inext, %body]
+  %si = getelementptr i8, i8* %s, i32 %i
+  %c = load i8, i8* %si
+  %cc = icmp eq i8 %c, 0
+  br i1 %cc, label %exit, label %body
+body:
+  %ca = zext i8 %c to )"+putchar_arg_ty+R"(
+  call )"+putchar_ret_ty+R"( @putchar()"+putchar_arg_ty+R"( %ca)
+  %inext = add i32 %i, 1
+  br label %head
+exit:
+  )"+print_newline+R"(
+  ret i32 1
+}
+)"+putchar_decl+"\n",
+      R"(
+define i64 @puts(i8* %s){
+entry:
+  br label %head
+head:
+  %i = phi i32 [0, %entry], [%inext, %body]
+  %si = getelementptr i8, i8* %s, i32 %i
+  %c = load i8, i8* %si
+  %cc = icmp eq i8 %c, 0
+  br i1 %cc, label %exit, label %body
+body:
+  %ca = zext i8 %c to )"+putchar_arg_ty+R"(
+  call )"+putchar_ret_ty+R"( @putchar()"+putchar_arg_ty+R"( %ca)
+  %inext = add i32 %i, 1
+  br label %head
+exit:
+  )"+print_newline+R"(
+  ret i64 1
+}
+)"+putchar_decl+"\n"});
   return true;
-};
+}
 
 char AddLibPass::ID = 0;
 static llvm::RegisterPass<AddLibPass> X("add-lib",

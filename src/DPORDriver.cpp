@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Carl Leonardsson
+/* Copyright (C) 2014-2017 Carl Leonardsson
  *
  * This file is part of Nidhugg.
  *
@@ -22,6 +22,8 @@
 #include "CheckModule.h"
 #include "Debug.h"
 #include "Interpreter.h"
+#include "POWERInterpreter.h"
+#include "POWERARMTraceBuilder.h"
 #include "PSOInterpreter.h"
 #include "PSOTraceBuilder.h"
 #include "SigSegvHandler.h"
@@ -47,7 +49,7 @@ DPORDriver::DPORDriver(const Configuration &C) :
   conf(C), mod(0) {
   std::string ErrorMsg;
   llvm::sys::DynamicLibrary::LoadLibraryPermanently(0,&ErrorMsg);
-};
+}
 
 DPORDriver *DPORDriver::parseIRFile(const std::string &filename,
                                     const Configuration &C){
@@ -57,7 +59,7 @@ DPORDriver *DPORDriver::parseIRFile(const std::string &filename,
   driver->reparse();
   CheckModule::check_functions(driver->mod);
   return driver;
-};
+}
 
 DPORDriver *DPORDriver::parseIR(const std::string &llvm_asm,
                                 const Configuration &C){
@@ -67,11 +69,11 @@ DPORDriver *DPORDriver::parseIR(const std::string &llvm_asm,
   driver->reparse();
   CheckModule::check_functions(driver->mod);
   return driver;
-};
+}
 
 DPORDriver::~DPORDriver(){
   delete mod;
-};
+}
 
 void DPORDriver::read_file(const std::string &filename, std::string &tgt){
   std::ifstream is(filename);
@@ -83,7 +85,7 @@ void DPORDriver::read_file(const std::string &filename, std::string &tgt){
   is.seekg(0,std::ios::beg);
   is.read(&tgt[0],tgt.size());
   is.close();
-};
+}
 
 void DPORDriver::reparse(){
   delete mod;
@@ -95,20 +97,23 @@ void DPORDriver::reparse(){
       mod->setDataLayout("E");
     }
   }
-};
+}
 
-Trace DPORDriver::run_once(TraceBuilder &TB) const{
+llvm::ExecutionEngine *DPORDriver::create_execution_engine(TraceBuilder &TB, const Configuration &conf) const {
   std::string ErrorMsg;
   llvm::ExecutionEngine *EE = 0;
   switch(conf.memory_model){
   case Configuration::SC:
-    EE = llvm::Interpreter::create(mod,TB,conf,&ErrorMsg);
+    EE = llvm::Interpreter::create(mod,static_cast<TSOPSOTraceBuilder&>(TB),conf,&ErrorMsg);
     break;
   case Configuration::TSO:
     EE = TSOInterpreter::create(mod,static_cast<TSOTraceBuilder&>(TB),conf,&ErrorMsg);
     break;
   case Configuration::PSO:
     EE = PSOInterpreter::create(mod,static_cast<PSOTraceBuilder&>(TB),conf,&ErrorMsg);
+    break;
+  case Configuration::ARM: case Configuration::POWER:
+    EE = POWERInterpreter::create(mod,static_cast<POWERARMTraceBuilder&>(TB),conf,&ErrorMsg);
     break;
   case Configuration::MM_UNDEF:
     throw std::logic_error("DPORDriver: No memory model is specified.");
@@ -140,29 +145,47 @@ Trace DPORDriver::run_once(TraceBuilder &TB) const{
   // invalidated will be known.
   (void)EE->getPointerToFunction(EntryFn);
 
-  // Empty environment
-  char *act_envp = 0;
-  char **envp = &act_envp;
+  return EE;
+}
+
+Trace *DPORDriver::run_once(TraceBuilder &TB) const{
+  std::shared_ptr<llvm::ExecutionEngine> EE(create_execution_engine(TB,conf));
 
   // Run main.
-  EE->runFunctionAsMain(EntryFn, {"prog"}, envp);
+  EE->runFunctionAsMain(mod->getFunction("main"), {"prog"}, 0);
 
   // Run static destructors.
   EE->runStaticConstructorsDestructors(true);
 
   if(conf.check_robustness){
-    static_cast<llvm::Interpreter*>(EE)->checkForCycles();
+    static_cast<llvm::Interpreter*>(EE.get())->checkForCycles();
   }
 
-  delete EE;
+  EE.reset();
 
-  Trace t({},{},{});
+  Trace *t = 0;
   if(TB.has_error() || conf.debug_collect_all_traces){
-    t = TB.get_trace();
+    if(TB.has_error() &&
+       (conf.memory_model == Configuration::ARM ||
+        conf.memory_model == Configuration::POWER)){
+      static_cast<POWERARMTraceBuilder&>(TB).replay();
+      Configuration conf2(conf);
+      conf2.ee_store_trace = true;
+      llvm::ExecutionEngine *E = create_execution_engine(TB,conf2);
+      E->runFunctionAsMain(mod->getFunction("main"), {"prog"}, 0);
+      E->runStaticConstructorsDestructors(true);
+      if(conf.check_robustness){
+        static_cast<llvm::Interpreter*>(E)->checkForCycles();
+      }
+      t = TB.get_trace();
+      delete E;
+    }else{
+      t = TB.get_trace();
+    }
   }// else avoid computing trace
 
   return t;
-};
+}
 
 DPORDriver::Result DPORDriver::run(){
   Result res;
@@ -178,6 +201,12 @@ DPORDriver::Result DPORDriver::run(){
     break;
   case Configuration::PSO:
     TB = new PSOTraceBuilder(conf);
+    break;
+  case Configuration::ARM:
+    TB = new ARMTraceBuilder(conf);
+    break;
+  case Configuration::POWER:
+    TB = new POWERTraceBuilder(conf);
     break;
   case Configuration::MM_UNDEF:
     throw std::logic_error("DPORDriver: No memory model is specified.");
@@ -211,9 +240,11 @@ DPORDriver::Result DPORDriver::run(){
     if((computation_count+1) % 1000 == 0){
       reparse();
     }
-    Trace t = run_once(*TB);
-    if(conf.debug_collect_all_traces){
+    Trace *t = run_once(*TB);
+    bool t_used = false;
+    if(t && conf.debug_collect_all_traces){
       res.all_traces.push_back(t);
+      t_used = true;
     }
     if(TB->sleepset_is_empty()){
       ++res.trace_count;
@@ -221,10 +252,15 @@ DPORDriver::Result DPORDriver::run(){
       ++res.sleepset_blocked_trace_count;
     }
     ++computation_count;
-    if(t.has_errors() && !res.has_errors()){
+    if(t && t->has_errors() && !res.has_errors()){
       res.error_trace = t;
+      t_used = true;
     }
-    if(t.has_errors() && !conf.explore_all_traces) break;
+    bool has_errors = t && t->has_errors();
+    if(!t_used){
+      delete t;
+    }
+    if(has_errors && !conf.explore_all_traces) break;
     if(conf.print_progress_estimate && (computation_count+1) % 100 == 0){
       estimate = TB->estimate_trace_count();
     }
@@ -239,4 +275,4 @@ DPORDriver::Result DPORDriver::run(){
   delete TB;
 
   return res;
-};
+}

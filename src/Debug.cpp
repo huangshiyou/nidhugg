@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Carl Leonardsson
+/* Copyright (C) 2014-2017 Carl Leonardsson
  *
  * This file is part of Nidhugg.
  *
@@ -23,7 +23,7 @@
 
 llvm::raw_ostream &Debug::warn(){
   return llvm::errs();
-};
+}
 
 llvm::raw_ostream &Debug::warn(const std::string &wid){
   static VecSet<std::string> seen_wids;
@@ -36,4 +36,4 @@ llvm::raw_ostream &Debug::warn(const std::string &wid){
     seen_wids.insert(wid);
     return llvm::errs();
   }
-};
+}

@@ -1,4 +1,4 @@
-/* Copyright (C) 2012-2014 Carl Leonardsson
+/* Copyright (C) 2012-2017 Carl Leonardsson
  *
  * This file is part of Nidhugg.
  *
@@ -27,7 +27,7 @@ VecSet<T>::VecSet(ITER begin, ITER end){
       insert(*begin);
     }
   }
-};
+}
 
 template<class T>
 VecSet<T>::VecSet(std::initializer_list<T> il){
@@ -38,7 +38,21 @@ VecSet<T>::VecSet(std::initializer_list<T> il){
       insert(*it);
     }
   }
-};
+}
+
+template<class T>
+VecSet<T>::VecSet(VecSet<T> &&S)
+  : vec(std::move(S.vec))
+{
+}
+
+template<class T>
+VecSet<T> &VecSet<T>::operator=(VecSet<T> &&S){
+  if(this != &S){
+    vec = std::move(S.vec);
+  }
+  return *this;
+}
 
 template<class T>
 int VecSet<T>::find_geq(const T &t) const{
@@ -56,7 +70,7 @@ int VecSet<T>::find_geq(const T &t) const{
     }
   }
   return a;
-};
+}
 
 template<class T>
 int VecSet<T>::find(const T &t) const{
@@ -66,7 +80,7 @@ int VecSet<T>::find(const T &t) const{
   }else{
     return i;
   }
-};
+}
 
 template<class T>
 int VecSet<T>::count(const T &t) const{
@@ -75,7 +89,7 @@ int VecSet<T>::count(const T &t) const{
   }else{
     return 0;
   }
-};
+}
 
 template<class T>
 std::pair<int,bool> VecSet<T>::insert(const T &t){
@@ -95,7 +109,7 @@ std::pair<int,bool> VecSet<T>::insert(const T &t){
     }
     return std::pair<int,bool>(i,true);
   }
-};
+}
 
 template<class T>
 int VecSet<T>::insert(const VecSet<T> &s){
@@ -151,7 +165,7 @@ int VecSet<T>::insert(const VecSet<T> &s){
 
     return count;
   }
-};
+}
 
 template<class T>
 int VecSet<T>::erase(const T &t){
@@ -164,7 +178,39 @@ int VecSet<T>::erase(const T &t){
   vec.resize(vec.size()-1,t);
 
   return 1;
-};
+}
+
+template<class T>
+int VecSet<T>::erase(const VecSet<T> &S){
+  if(vec.empty()) return 0;
+  if(S.vec.empty()) return 0;
+  int a = 0;
+  int b = 0;
+  int ains = 0;
+  int erase_count = 0;
+  while(a < size() && b < S.size()){
+    if(vec[a] == S.vec[b]){
+      ++a;
+      ++b;
+      ++erase_count;
+    }else if(vec[a] < S.vec[b]){
+      if(ains != a) vec[ains] = vec[a];
+      ++a;
+      ++ains;
+    }else{
+      ++b;
+    }
+  }
+  if(ains != a){
+    while(a < size()){
+      vec[ains] = vec[a];
+      ++a;
+      ++ains;
+    }
+    vec.resize(ains,vec[0]);
+  }
+  return erase_count;
+}
 
 template<class T>
 bool VecSet<T>::check_invariant() const{
@@ -174,7 +220,7 @@ bool VecSet<T>::check_invariant() const{
     }
   }
   return true;
-};
+}
 
 template<class T>
 std::string VecSet<T>::to_string_one_line(std::function<std::string(const T&)> &f) const{
@@ -185,7 +231,7 @@ std::string VecSet<T>::to_string_one_line(std::function<std::string(const T&)> &
   }
   s += "}";
   return s;
-};
+}
 
 template<class T>
 bool VecSet<T>::subset_of(const VecSet<T> &s) const{
@@ -208,7 +254,7 @@ bool VecSet<T>::subset_of(const VecSet<T> &s) const{
     }
   }
   return true;
-};
+}
 
 template<class T>
 bool VecSet<T>::intersects(const VecSet<T> &s) const{
@@ -224,4 +270,4 @@ bool VecSet<T>::intersects(const VecSet<T> &s) const{
     }
   }
   return false;
-};
+}

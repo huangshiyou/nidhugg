@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Carl Leonardsson
+/* Copyright (C) 2014-2017 Carl Leonardsson
  *
  * This file is part of Nidhugg.
  *
@@ -43,46 +43,39 @@
 #endif
 #include <llvm/Support/Dwarf.h>
 
-Trace::Trace(const std::vector<IID<CPid> > &cmp,
-             const std::vector<const llvm::MDNode*> &cmpmd,
-             const std::vector<Error*> &errors)
-  : computation(cmp), computation_md(cmpmd),
-    errors(errors), sleep_set_blocked(false) {
-};
+Trace::Trace(const std::vector<Error*> &errors, bool blk)
+  : errors(errors), blocked(blk) {
+}
 
 Trace::~Trace(){
   for(unsigned i = 0; i < errors.size(); ++i){
     delete errors[i];
   }
-};
+}
 
-Trace::Trace(const Trace &t)
-  : computation(t.computation),
-    computation_md(t.computation_md),
-    sleep_set_blocked(t.sleep_set_blocked)
-{
-  for(unsigned i = 0; i < t.errors.size(); ++i){
-    errors.push_back(t.errors[i]->clone());
-  }
-};
+IIDSeqTrace::IIDSeqTrace(const std::vector<IID<CPid> > &cmp,
+                         const std::vector<const llvm::MDNode*> &cmpmd,
+                         const std::vector<Error*> &errors,
+                         bool blk)
+  : Trace(errors,blk), computation(cmp), computation_md(cmpmd) {
+}
 
-Trace &Trace::operator=(const Trace &t){
-  if(&t != this){
-    computation = t.computation;
-    computation_md = t.computation_md;
-    for(unsigned i = 0; i < errors.size(); ++i){
-      delete errors[i];
+IIDSeqTrace::~IIDSeqTrace(){
+}
+
+std::string Trace::to_string(int _ind) const{
+  if(errors.size()){
+    std::string s = "Errors found:\n";
+    for(Error *e : errors){
+      s += e->to_string()+"\n";
     }
-    errors.clear();
-    for(unsigned i = 0; i < t.errors.size(); ++i){
-      errors.push_back(t.errors[i]->clone());
-    }
-    sleep_set_blocked = t.sleep_set_blocked;
+    return s;
+  }else{
+    return "No errors found.\n";
   }
-  return *this;
-};
+}
 
-std::string Trace::computation_to_string(int _ind) const{
+std::string IIDSeqTrace::to_string(int _ind) const{
   std::string s;
   std::string ind;
   assert(_ind >= 0);
@@ -159,47 +152,47 @@ std::string Trace::computation_to_string(int _ind) const{
     }
   }
   return s;
-};
+}
 
 Error *AssertionError::clone() const{
   return new AssertionError(loc,condition);
-};
+}
 
 std::string AssertionError::to_string() const{
   return "Assertion violation at "+loc.to_string()+": ("+condition+")";
-};
+}
 
 Error *PthreadsError::clone() const{
   return new PthreadsError(loc,msg);
-};
+}
 
 std::string PthreadsError::to_string() const{
   return "Pthreads error at "+loc.to_string()+": "+msg;
-};
+}
 
 Error *SegmentationFaultError::clone() const{
   return new SegmentationFaultError(loc);
-};
+}
 
 std::string SegmentationFaultError::to_string() const{
   return "Segmentation fault at "+loc.to_string();
-};
+}
 
 Error *RobustnessError::clone() const{
   return new RobustnessError(loc);
-};
+}
 
 std::string RobustnessError::to_string() const{
   return "The trace contains a happens-before cycle.";
-};
+}
 
 Error *MemoryError::clone() const{
   return new MemoryError(loc,msg);
-};
+}
 
 std::string MemoryError::to_string() const{
   return "Memory error at "+loc.to_string()+": ("+msg+")";
-};
+}
 
 bool Trace::get_location(const llvm::MDNode *m,
                          int *lineno,
@@ -208,8 +201,16 @@ bool Trace::get_location(const llvm::MDNode *m,
   if(!m){
     return false;
   }
+#ifdef LLVM_DILOCATION_IS_MDNODE
+  const llvm::DILocation &loc = static_cast<const llvm::DILocation&>(*m);
+#else
   llvm::DILocation loc(m);
+#endif
+#ifdef LLVM_DILOCATION_HAS_GETLINENUMBER
   *lineno = loc.getLineNumber();
+#else
+  *lineno = loc.getLine();
+#endif
   *fname = loc.getFilename();
   *dname = loc.getDirectory();
 #if defined(LLVM_MDNODE_OPERAND_IS_VALUE) /* Otherwise, disable fallback and hope that the C compiler produces well-formed metadata. */
@@ -266,8 +267,8 @@ bool Trace::get_location(const llvm::MDNode *m,
     }
   }
 #endif
-  return (lineno >= 0) && fname->size() && dname->size();
-};
+  return (*lineno >= 0) && fname->size() && dname->size();
+}
 
 std::string Trace::get_src_line_verbatim(const llvm::MDNode *m){
   int lineno;
@@ -300,7 +301,7 @@ std::string Trace::get_src_line_verbatim(const llvm::MDNode *m){
   }
 
   return ln;
-};
+}
 
 std::string Trace::basename(const std::string &fname){
   std::size_t i = fname.find_last_of('/');
@@ -309,8 +310,8 @@ std::string Trace::basename(const std::string &fname){
     return basename(fname.substr(0,fname.size()-1));
   }
   return fname.substr(i+1);
-};
+}
 
 bool Trace::is_absolute_path(const std::string &fname){
   return fname.size() && fname.front() == '/';
-};
+}

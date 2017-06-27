@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Carl Leonardsson
+/* Copyright (C) 2014-2017 Carl Leonardsson
  *
  * This file is part of Nidhugg.
  *
@@ -34,10 +34,10 @@ PSOInterpreter::PSOInterpreter(llvm::Module *M, PSOTraceBuilder &TB,
                                const Configuration &conf)
   : Interpreter(M,TB,conf) {
   pso_threads.push_back(PSOThread());
-};
+}
 
 PSOInterpreter::~PSOInterpreter(){
-};
+}
 
 bool PSOInterpreter::PSOThread::readable(const ConstMRef &ml) const {
   for(void const *b : ml){
@@ -48,7 +48,7 @@ bool PSOInterpreter::PSOThread::readable(const ConstMRef &ml) const {
     }
   }
   return true;
-};
+}
 
 llvm::ExecutionEngine *PSOInterpreter::create(llvm::Module *M, PSOTraceBuilder &TB,
                                               const Configuration &conf,
@@ -59,15 +59,32 @@ llvm::ExecutionEngine *PSOInterpreter::create(llvm::Module *M, PSOTraceBuilder &
     if(ErrorStr) *ErrorStr = EC.message();
     return 0;
   }
-#else
+#elif defined LLVM_MODULE_MATERIALIZE_ALL_PERMANENTLY_BOOL_STRPTR
   if (M->MaterializeAllPermanently(ErrorStr)){
     // We got an error, just return 0
+    return 0;
+  }
+#elif defined LLVM_MODULE_MATERIALIZE_LLVM_ALL_ERROR
+  if (llvm::Error Err = M->materializeAll()) {
+    std::string Msg;
+    handleAllErrors(std::move(Err), [&](llvm::ErrorInfoBase &EIB) {
+      Msg = EIB.message();
+    });
+    if (ErrorStr)
+      *ErrorStr = Msg;
+    // We got an error, just return 0
+    return nullptr;
+  }
+#else
+  if(std::error_code EC = M->materializeAll()){
+    // We got an error, just return 0
+    if(ErrorStr) *ErrorStr = EC.message();
     return 0;
   }
 #endif
 
   return new PSOInterpreter(M,TB,conf);
-};
+}
 
 void PSOInterpreter::runAux(int proc, int aux){
   /* Perform an update from store buffer to memory. */
@@ -87,7 +104,7 @@ void PSOInterpreter::runAux(int proc, int aux){
 
   if(DryRun) return;
 
-  uint8_t blk[ml.size];
+  uint8_t *blk = new uint8_t[ml.size];
 
   for(void const *b : ml){
     assert(pso_threads[proc].store_buffers.count(b));
@@ -103,8 +120,10 @@ void PSOInterpreter::runAux(int proc, int aux){
   }
 
   if(!CheckedMemCpy((uint8_t*)b0,blk,ml.size)){
+    delete[] blk;
     return;
-  };
+  }
+  delete[] blk;
 
   /* Should we reenable the thread after awaiting buffer flush? */
   switch(pso_threads[proc].awaiting_buffer_flush){
@@ -136,12 +155,12 @@ void PSOInterpreter::runAux(int proc, int aux){
       }
     }
   }
-};
+}
 
 int PSOInterpreter::newThread(const CPid &cpid){
   pso_threads.push_back(PSOThread());
   return Interpreter::newThread(cpid);
-};
+}
 
 bool PSOInterpreter::isFence(llvm::Instruction &I){
   if(llvm::isa<llvm::CallInst>(I)){
@@ -158,32 +177,32 @@ bool PSOInterpreter::isFence(llvm::Instruction &I){
       if(isInlineAsm(CS,&asmstr) && asmstr == "mfence") return true;
     }
   }else if(llvm::isa<llvm::StoreInst>(I)){
-    return static_cast<llvm::StoreInst&>(I).getOrdering() == llvm::SequentiallyConsistent;
+    return static_cast<llvm::StoreInst&>(I).getOrdering() == LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent;
   }else if(llvm::isa<llvm::FenceInst>(I)){
-    return static_cast<llvm::FenceInst&>(I).getOrdering() == llvm::SequentiallyConsistent;
+    return static_cast<llvm::FenceInst&>(I).getOrdering() == LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent;
   }else if(llvm::isa<llvm::AtomicCmpXchgInst>(I)){
 #ifdef LLVM_CMPXCHG_SEPARATE_SUCCESS_FAILURE_ORDERING
     llvm::AtomicOrdering succ = static_cast<llvm::AtomicCmpXchgInst&>(I).getSuccessOrdering();
     llvm::AtomicOrdering fail = static_cast<llvm::AtomicCmpXchgInst&>(I).getFailureOrdering();
-    if(succ != llvm::SequentiallyConsistent || fail != llvm::SequentiallyConsistent){
+    if(succ != LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent || fail != LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent){
 #else
-    if(static_cast<llvm::AtomicCmpXchgInst&>(I).getOrdering() != llvm::SequentiallyConsistent){
+    if(static_cast<llvm::AtomicCmpXchgInst&>(I).getOrdering() != LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent){
 #endif
       Debug::warn("PSOInterpreter::isFence::cmpxchg") << "WARNING: Non-sequentially consistent CMPXCHG instruction interpreted as sequentially consistent.\n";
     }
     return true;
   }else if(llvm::isa<llvm::AtomicRMWInst>(I)){
-    if(static_cast<llvm::AtomicRMWInst&>(I).getOrdering() != llvm::SequentiallyConsistent){
+    if(static_cast<llvm::AtomicRMWInst&>(I).getOrdering() != LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent){
       Debug::warn("PSOInterpreter::isFence::rmw") << "WARNING: Non-sequentially consistent RMW instruction interpreted as sequentially consistent.\n";
     }
     return true;
   }
   return false;
-};
+}
 
 void PSOInterpreter::terminate(llvm::Type *RetTy, llvm::GenericValue Result){
   if(CurrentThread != 0){
-    assert(RetTy == llvm::Type::getInt8PtrTy(llvm::getGlobalContext()));
+    assert(RetTy == llvm::Type::getInt8PtrTy(RetTy->getContext()));
     Threads[CurrentThread].RetVal = Result;
   }
   if(pso_threads[CurrentThread].all_buffers_empty()){
@@ -191,7 +210,7 @@ void PSOInterpreter::terminate(llvm::Type *RetTy, llvm::GenericValue Result){
       TB.mark_available(p);
     }
   }
-};
+}
 
 bool PSOInterpreter::checkRefuse(llvm::Instruction &I){
   int tid;
@@ -237,7 +256,7 @@ bool PSOInterpreter::checkRefuse(llvm::Instruction &I){
     }
   }
   return Interpreter::checkRefuse(I);
-};
+}
 
 void PSOInterpreter::visitLoadInst(llvm::LoadInst &I){
   llvm::ExecutionContext &SF = ECStack()->back();
@@ -257,20 +276,21 @@ void PSOInterpreter::visitLoadInst(llvm::LoadInst &I){
 
   /* Check store buffer for ROWE opportunity. */
   if(pso_threads[CurrentThread].store_buffers.count(ml.ref)){
-    uint8_t blk[ml.size];
+    uint8_t *blk = new uint8_t[ml.size];
     for(void const *b : ml){
       assert(pso_threads[CurrentThread].store_buffers[b].back().ml == ml);
       blk[unsigned((uint8_t const *)b-(uint8_t const *)ml.ref)] = pso_threads[CurrentThread].store_buffers[b].back().val;
     }
     CheckedLoadValueFromMemory(Result,(llvm::GenericValue*)blk,I.getType());
     SetValue(&I, Result, SF);
+    delete[] blk;
     return;
   }
 
   /* Load from memory */
   if(!CheckedLoadValueFromMemory(Result, Ptr, I.getType())) return;
   SetValue(&I, Result, SF);
-};
+}
 
 void PSOInterpreter::visitStoreInst(llvm::StoreInst &I){
   llvm::ExecutionContext &SF = ECStack()->back();
@@ -279,7 +299,7 @@ void PSOInterpreter::visitStoreInst(llvm::StoreInst &I){
 
   PSOThread &thr = pso_threads[CurrentThread];
 
-  if(I.getOrdering() == llvm::SequentiallyConsistent ||
+  if(I.getOrdering() == LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent ||
      0 <= AtomicFunctionCall){
     /* Atomic store */
     assert(thr.all_buffers_empty());
@@ -307,28 +327,29 @@ void PSOInterpreter::visitStoreInst(llvm::StoreInst &I){
       thr.store_buffers[b].push_back(PendingStoreByte(mb.get_ref(),((uint8_t*)mb.get_block())[i]));
     }
   }
-};
+}
 
 void PSOInterpreter::visitFenceInst(llvm::FenceInst &I){
-  if(I.getOrdering() == llvm::SequentiallyConsistent){
+  if(I.getOrdering() == LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent){
     TB.fence();
   }
-};
+}
 
 void PSOInterpreter::visitAtomicCmpXchgInst(llvm::AtomicCmpXchgInst &I){
   assert(pso_threads[CurrentThread].all_buffers_empty());
   Interpreter::visitAtomicCmpXchgInst(I);
-};
+}
 
 void PSOInterpreter::visitAtomicRMWInst(llvm::AtomicRMWInst &I){
   assert(pso_threads[CurrentThread].all_buffers_empty());
   Interpreter::visitAtomicRMWInst(I);
-};
+}
 
 void PSOInterpreter::visitInlineAsm(llvm::CallSite &CS, const std::string &asmstr){
   if(asmstr == "mfence"){
     TB.fence();
+  }else if(asmstr == ""){ // Do nothing
   }else{
     throw std::logic_error("Unsupported inline assembly: "+asmstr);
   }
-};
+}

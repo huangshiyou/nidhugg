@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Carl Leonardsson
+/* Copyright (C) 2014-2017 Carl Leonardsson
  *
  * This file is part of Nidhugg.
  *
@@ -17,6 +17,8 @@
  * <http://www.gnu.org/licenses/>.
  */
 
+#include "GlobalContext.h"
+#include "nregex.h"
 #include "StrModule.h"
 
 #if defined(HAVE_LLVM_ASSEMBLY_PRINTMODULEPASS_H)
@@ -24,13 +26,15 @@
 #elif defined(HAVE_LLVM_IR_IRPRINTINGPASSES_H)
 #include <llvm/IR/IRPrintingPasses.h>
 #endif
-#if defined(HAVE_LLVM_IR_LLVMCONTEXT_H)
-#include <llvm/IR/LLVMContext.h>
-#elif defined(HAVE_LLVM_LLVMCONTEXT_H)
-#include <llvm/LLVMContext.h>
-#endif
 #include <llvm/IRReader/IRReader.h>
+#if defined(HAVE_LLVM_PASSMANAGER_H)
 #include <llvm/PassManager.h>
+#elif defined(HAVE_LLVM_IR_PASSMANAGER_H)
+#include <llvm/IR/PassManager.h>
+#endif
+#if defined(HAVE_LLVM_IR_LEGACYPASSMANAGER_H) && defined(LLVM_PASSMANAGER_TEMPLATE)
+#include <llvm/IR/LegacyPassManager.h>
+#endif
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/raw_ostream.h>
@@ -64,9 +68,9 @@ namespace StrModule {
     llvm::MemoryBuffer *mbp = buf.get().release();
 #endif
 #ifdef LLVM_PARSE_IR_MEMBUF_PTR
-    mod = llvm::ParseIR(mbp,err,llvm::getGlobalContext());
+    mod = llvm::ParseIR(mbp,err,GlobalContext::get());
 #else
-    mod = llvm::parseIR(mbp->getMemBufferRef(),err,llvm::getGlobalContext()).release();
+    mod = llvm::parseIR(mbp->getMemBufferRef(),err,GlobalContext::get()).release();
 #endif
 #ifndef LLVM_PARSE_IR_TAKES_OWNERSHIP
     delete mbp;
@@ -76,7 +80,7 @@ namespace StrModule {
       throw std::logic_error("Failed to parse assembly.");
     }
     return mod;
-  };
+  }
 
   llvm::Module *read_module_src(const std::string &src){
     llvm::Module *mod;
@@ -88,9 +92,9 @@ namespace StrModule {
       llvm::MemoryBuffer::getMemBuffer(src,"",false).release();
 #endif
 #ifdef LLVM_PARSE_IR_MEMBUF_PTR
-    mod = llvm::ParseIR(buf,err,llvm::getGlobalContext());
+    mod = llvm::ParseIR(buf,err,GlobalContext::get());
 #else
-    mod = llvm::parseIR(buf->getMemBufferRef(),err,llvm::getGlobalContext()).release();
+    mod = llvm::parseIR(buf->getMemBufferRef(),err,GlobalContext::get()).release();
 #endif
 #ifndef LLVM_PARSE_IR_TAKES_OWNERSHIP
     delete buf;
@@ -100,10 +104,14 @@ namespace StrModule {
       throw std::logic_error("Failed to parse assembly.");
     }
     return mod;
-  };
+  }
 
   void write_module(llvm::Module *mod, std::string outfile){
+#ifdef LLVM_PASSMANAGER_TEMPLATE
+    llvm::legacy::PassManager PM;
+#else
     llvm::PassManager PM;
+#endif
 #ifdef LLVM_RAW_FD_OSTREAM_ERR_STR
     std::string errs;
 #else
@@ -132,11 +140,15 @@ namespace StrModule {
     PM.add(llvm::createPrintModulePass(*os));
 #endif
     PM.run(*mod);
-  };
+  }
 
   std::string write_module_str(llvm::Module *mod){
     std::string s;
+#ifdef LLVM_PASSMANAGER_TEMPLATE
+    llvm::legacy::PassManager PM;
+#else
     llvm::PassManager PM;
+#endif
     llvm::raw_ostream *os = new llvm::raw_string_ostream(s);
 #ifdef LLVM_CREATE_PRINT_MODULE_PASS_PTR_ARG
     PM.add(llvm::createPrintModulePass(os,true));
@@ -148,7 +160,29 @@ namespace StrModule {
     delete os;
 #endif
     return s;
-  };
+  }
 
-};
+  std::string portasm(std::string s){
+#ifndef LLVM_ASM_LOAD_EXPLICIT_TYPE
+    {
+      /* Remove explicit return types for loads: Replace loads of the
+       * form
+       *
+       * load rettype, rettype* addr
+       *
+       * with loads of the form
+       *
+       * load rettype* addr
+       */
+      s = nregex::regex_replace(s,"load [^,]*,","load ");
+    }
+    {
+      /* Remove explicit return types for getelementptr.*/
+      s = nregex::regex_replace(s,"getelementptr *((inbounds)?) *[^ (]*,","getelementptr $1 ");
+      s = nregex::regex_replace(s,"getelementptr *\\([^,]*,","getelementptr (");
+    }
+#endif
+    return s;
+  }
+}
 

@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Carl Leonardsson
+/* Copyright (C) 2014-2017 Carl Leonardsson
  *
  * This file is part of Nidhugg.
  *
@@ -20,6 +20,9 @@
 #include "Configuration.h"
 
 #include <llvm/Support/CommandLine.h>
+#include "Debug.h"
+
+extern llvm::cl::opt<std::string> cl_transform;
 
 static llvm::cl::opt<bool> cl_explore_all("explore-all",llvm::cl::NotHidden,
                                           llvm::cl::desc("Continue exploring all traces, "
@@ -27,6 +30,9 @@ static llvm::cl::opt<bool> cl_explore_all("explore-all",llvm::cl::NotHidden,
 
 static llvm::cl::opt<bool> cl_malloc_may_fail("malloc-may-fail",llvm::cl::NotHidden,
                                               llvm::cl::desc("If set then the case of malloc failure is also explored."));
+
+static llvm::cl::opt<bool> cl_disable_mutex_init_requirement("disable-mutex-init-requirement",llvm::cl::NotHidden,
+                                                             llvm::cl::desc("If set, then allow use of mutexes without a preceding call to pthread_mutex_init.\nThis switch is necessary when using static mutex initialization."));
 
 static llvm::cl::opt<int>
 cl_max_search_depth("max-search-depth",
@@ -37,9 +43,14 @@ static llvm::cl::opt<Configuration::MemoryModel>
 cl_memory_model(llvm::cl::NotHidden, llvm::cl::init(Configuration::MM_UNDEF),
                 llvm::cl::desc("Select memory model"),
                 llvm::cl::values(clEnumValN(Configuration::SC,"sc","Sequential Consistency"),
+                                 clEnumValN(Configuration::ARM,"arm","The ARM model"),
+                                 clEnumValN(Configuration::POWER,"power","The POWER model"),
                                  clEnumValN(Configuration::PSO,"pso","Partial Store Order"),
-                                 clEnumValN(Configuration::TSO,"tso","Total Store Order"),
-                                 clEnumValEnd));
+                                 clEnumValN(Configuration::TSO,"tso","Total Store Order")
+#ifdef LLVM_CL_VALUES_USES_SENTINEL
+                                ,clEnumValEnd
+#endif
+                                 ));
 
 static llvm::cl::opt<bool> cl_check_robustness("robustness",llvm::cl::NotHidden,
                                                llvm::cl::desc("Check for robustness as a correctness criterion."));
@@ -73,8 +84,9 @@ const std::set<std::string> &Configuration::commandline_opts(){
     "dpor-explore-all",
     "extfun-no-race",
     "malloc-may-fail",
+    "disable-mutex-init-requirement",
     "max-search-depth",
-    "sc","tso","pso",
+    "sc","tso","pso","power","arm",
     "robustness",
     "no-spin-assume",
     "unroll",
@@ -82,7 +94,7 @@ const std::set<std::string> &Configuration::commandline_opts(){
     "print-progress-estimate"
   };
   return opts;
-};
+}
 
 const Configuration Configuration::default_conf;
 
@@ -92,6 +104,7 @@ void Configuration::assign_by_commandline(){
     extfun_no_full_memory_conflict.insert(f);
   }
   malloc_may_fail = cl_malloc_may_fail;
+  mutex_require_init = !cl_disable_mutex_init_requirement;
   max_search_depth = cl_max_search_depth;
   memory_model = cl_memory_model;
   check_robustness = cl_check_robustness;
@@ -99,4 +112,78 @@ void Configuration::assign_by_commandline(){
   transform_loop_unroll = cl_transform_loop_unroll;
   print_progress = cl_print_progress || cl_print_progress_estimate;
   print_progress_estimate = cl_print_progress_estimate;
-};
+}
+
+void Configuration::check_commandline(){
+  /* Check commandline switch compatibility with --transform. */
+  if(cl_transform.getNumOccurrences()){
+    if(cl_extfun_no_race.getNumOccurrences()){
+      Debug::warn("Configuration::check_commandline:transform:extfun_no_race")
+        << "WARNING: --extfun-no-race ignored in presence of --transform.\n";
+    }
+    if(cl_malloc_may_fail.getNumOccurrences()){
+      Debug::warn("Configuration::check_commandline:transform:malloc_may_fail")
+        << "WARNING: --malloc_may_fail ignored in presence of --transform.\n";
+    }
+    if(cl_disable_mutex_init_requirement.getNumOccurrences()){
+      Debug::warn("Configuration::check_commandline:transform:disable_mutex_init_requirement")
+        << "WARNING: --disable-mutex-init-requirement ignored in presence of --transform.\n";
+    }
+    if(cl_max_search_depth.getNumOccurrences()){
+      Debug::warn("Configuration::check_commandline:transform:max-search-depth")
+        << "WARNING: --max-search-depth ignored in presence of --transform.\n";
+    }
+    if(cl_memory_model.getNumOccurrences()){
+      Debug::warn("Configuration::check_commandline:transform:memory_model")
+        << "WARNING: Given memory model ignored in presence of --transform.\n";
+    }
+    if(cl_print_progress.getNumOccurrences()){
+      Debug::warn("Configuration::check_commandline:transform:print-progress")
+        << "WARNING: --print-progress ignored in presence of --transform.\n";
+    }
+    if(cl_print_progress_estimate.getNumOccurrences()){
+      Debug::warn("Configuration::check_commandline:transform:print-progress-estimate")
+        << "WARNING: --print-progress-estimate ignored in presence of --transform.\n";
+    }
+    if(cl_check_robustness.getNumOccurrences()){
+      Debug::warn("Configuration::check_commandline:transform:check_robustness")
+        << "WARNING: --robustness ignored in presence of --transform.\n";
+    }
+  }else{
+    if(cl_transform_no_spin_assume.getNumOccurrences()){
+      Debug::warn("Configuration::check_commandline:no:transform:transform-no-spin-assume")
+        << "WARNING: --no-spin-assume ignored in absence of --transform.\n";
+    }
+    if(cl_transform_loop_unroll.getNumOccurrences()){
+      Debug::warn("Configuration::check_commandline:no:transform:transform_loop_unroll")
+        << "WARNING: --unroll ignored in absence of --transform.\n";
+    }
+  }
+  /* Check commandline switch compatibility with memory model. */
+  {
+    std::string mm;
+    if(cl_memory_model == Configuration::SC) mm = "SC";
+    if(cl_memory_model == Configuration::TSO) mm = "TSO";
+    if(cl_memory_model == Configuration::PSO) mm = "PSO";
+    if(cl_memory_model == Configuration::POWER) mm = "POWER";
+    if(cl_memory_model == Configuration::ARM) mm = "ARM";
+    if(cl_memory_model == Configuration::ARM || cl_memory_model == Configuration::POWER){
+      if(cl_extfun_no_race.getNumOccurrences()){
+        Debug::warn("Configuration::check_commandline:mm:extfun-no-race")
+          << "WARNING: --extfun-no-race ignored under memory model " << mm << ".\n";
+      }
+      if(cl_malloc_may_fail.getNumOccurrences()){
+        Debug::warn("Configuration::check_commandline:mm:malloc-may-fail")
+          << "WARNING: --malloc-may-fail ignored under memory model " << mm << ".\n";
+      }
+      if(cl_max_search_depth.getNumOccurrences()){
+        Debug::warn("Configuration::check_commandline:mm:max-search-depth")
+          << "WARNING: --max-search-depth ignored under memory model " << mm << ".\n";
+      }
+      if(cl_check_robustness.getNumOccurrences()){
+        Debug::warn("Configuration::check_commandline:mm:robustness")
+          << "WARNING: --robustness ignored under memory model " << mm << ".\n";
+      }
+    }
+  }
+}

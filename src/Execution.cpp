@@ -12,7 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-/* Copyright (C) 2014 Carl Leonardsson
+/* Copyright (C) 2014-2017 Carl Leonardsson
  * (For the modifications made in this file to the code from LLVM.)
  *
  * This file is part of Nidhugg.
@@ -1056,7 +1056,11 @@ GenericValue Interpreter::executeGEPOperation(Value *Ptr, gep_type_iterator I,
   uint64_t Total = 0;
 
   for (; I != E; ++I) {
+#ifdef LLVM_NEW_GEP_TYPE_ITERATOR_API
+    if (StructType *STy = I.getStructTypeOrNull()) {
+#else
     if (StructType *STy = dyn_cast<StructType>(*I)) {
+#endif
       const StructLayout *SLO = TD.getStructLayout(STy);
 
       const ConstantInt *CPU = cast<ConstantInt>(I.getOperand());
@@ -1064,7 +1068,6 @@ GenericValue Interpreter::executeGEPOperation(Value *Ptr, gep_type_iterator I,
 
       Total += SLO->getElementOffset(Index);
     } else {
-      SequentialType *ST = cast<SequentialType>(*I);
       // Get the index number for the array... which must be long type...
       GenericValue IdxGV = getOperandValue(I.getOperand(), SF);
 
@@ -1077,7 +1080,13 @@ GenericValue Interpreter::executeGEPOperation(Value *Ptr, gep_type_iterator I,
         assert(BitWidth == 64 && "Invalid index type for getelementptr");
         Idx = (int64_t)IdxGV.IntVal.getZExtValue();
       }
-      Total += TD.getTypeAllocSize(ST->getElementType())*Idx;
+      Total += TD.getTypeAllocSize
+#ifdef LLVM_NEW_GEP_TYPE_ITERATOR_API
+        (I.getIndexedType()
+#else
+        (cast<SequentialType>(*I)->getElementType()
+#endif
+         )*Idx;
     }
   }
 
@@ -1094,8 +1103,12 @@ void Interpreter::visitGetElementPtrInst(GetElementPtrInst &I) {
 
 void Interpreter::DryRunLoadValueFromMemory(GenericValue &Val,
                                             GenericValue *Src, Type *Ty){
+#ifdef LLVM_EXECUTIONENGINE_DATALAYOUT_PTR
   int sz = getDataLayout()->getTypeStoreSize(Ty);
-  char buf[sz];
+#else
+  int sz = getDataLayout().getTypeStoreSize(Ty);
+#endif
+  char *buf = new char[sz];
 
   // Copy value from memory to buf
   for(int i = 0; i < sz; ++i){
@@ -1117,7 +1130,8 @@ void Interpreter::DryRunLoadValueFromMemory(GenericValue &Val,
   }
 
   LoadValueFromMemory(Val,(GenericValue*)&buf[0],Ty);
-};
+  delete[] buf;
+}
 
 bool Interpreter::CheckedMemCpy(uint8_t *dst, const uint8_t *src, unsigned n){
   if(SigSegvHandler::setenv()){
@@ -1132,7 +1146,7 @@ bool Interpreter::CheckedMemCpy(uint8_t *dst, const uint8_t *src, unsigned n){
   }
   SigSegvHandler::unsetenv();
   return true;
-};
+}
 
 bool Interpreter::CheckedMemSet(uint8_t *s, int c, size_t n){
   if(SigSegvHandler::setenv()){
@@ -1147,7 +1161,7 @@ bool Interpreter::CheckedMemSet(uint8_t *s, int c, size_t n){
   }
   SigSegvHandler::unsetenv();
   return true;
-};
+}
 
 template<typename T> bool Interpreter::CheckedAssign(T &tgt, const T *src){
   if(SigSegvHandler::setenv()){
@@ -1159,7 +1173,7 @@ template<typename T> bool Interpreter::CheckedAssign(T &tgt, const T *src){
   }
   SigSegvHandler::unsetenv();
   return true;
-};
+}
 
 template<typename T> bool Interpreter::CheckedStore(T *tgt, const T &src){
   if(SigSegvHandler::setenv()){
@@ -1171,7 +1185,7 @@ template<typename T> bool Interpreter::CheckedStore(T *tgt, const T &src){
   }
   SigSegvHandler::unsetenv();
   return true;
-};
+}
 
 bool Interpreter::CheckedStoreIntToMemory(const APInt &IntVal, uint8_t *Dst,
                                           unsigned StoreBytes) {
@@ -1195,7 +1209,7 @@ bool Interpreter::CheckedStoreIntToMemory(const APInt &IntVal, uint8_t *Dst,
 
     return CheckedMemCpy(Dst, Src + sizeof(uint64_t) - StoreBytes, StoreBytes);
   }
-};
+}
 
 bool Interpreter::CheckedLoadIntFromMemory(APInt &IntVal, uint8_t *Src, unsigned LoadBytes) {
   assert((IntVal.getBitWidth()+7)/8 >= LoadBytes && "Integer too small!");
@@ -1219,11 +1233,15 @@ bool Interpreter::CheckedLoadIntFromMemory(APInt &IntVal, uint8_t *Src, unsigned
 
     return CheckedMemCpy(Dst + sizeof(uint64_t) - LoadBytes, Src, LoadBytes);
   }
-};
+}
 
 bool Interpreter::CheckedLoadValueFromMemory(GenericValue &Result,
                                              GenericValue *Ptr, Type *Ty){
+#ifdef LLVM_EXECUTIONENGINE_DATALAYOUT_PTR
   const unsigned LoadBytes = getDataLayout()->getTypeStoreSize(Ty);
+#else
+  const unsigned LoadBytes = getDataLayout().getTypeStoreSize(Ty);
+#endif
 
   switch (Ty->getTypeID()) {
   case Type::IntegerTyID:
@@ -1277,11 +1295,15 @@ bool Interpreter::CheckedLoadValueFromMemory(GenericValue &Result,
     report_fatal_error(OS.str());
   }
   return true;
-};
+}
 
 bool Interpreter::CheckedStoreValueToMemory(const GenericValue &Val,
                                             GenericValue *Ptr, Type *Ty){
+#ifdef LLVM_EXECUTIONENGINE_DATALAYOUT_PTR
   const unsigned StoreBytes = getDataLayout()->getTypeStoreSize(Ty);
+#else
+  const unsigned StoreBytes = getDataLayout().getTypeStoreSize(Ty);
+#endif
 
   switch (Ty->getTypeID()) {
   default:
@@ -1324,12 +1346,18 @@ bool Interpreter::CheckedStoreValueToMemory(const GenericValue &Val,
     break;
   }
 
-  if (sys::IsLittleEndianHost != getDataLayout()->isLittleEndian())
+#ifdef LLVM_EXECUTIONENGINE_DATALAYOUT_PTR
+  bool dl_little_endian = getDataLayout()->isLittleEndian();
+#else
+  bool dl_little_endian = getDataLayout().isLittleEndian();
+#endif
+  if (sys::IsLittleEndianHost != dl_little_endian){
     // Host and target are different endian - reverse the stored bytes.
     std::reverse((uint8_t*)Ptr, StoreBytes + (uint8_t*)Ptr);
+  }
 
   return true;
-};
+}
 
 void Interpreter::visitLoadInst(LoadInst &I) {
   ExecutionContext &SF = ECStack()->back();
@@ -1409,7 +1437,7 @@ void Interpreter::visitAtomicCmpXchgInst(AtomicCmpXchgInst &I){
 #endif
     SetValue(&I,Result,SF);
   }
-};
+}
 
 void Interpreter::visitAtomicRMWInst(AtomicRMWInst &I){
   ExecutionContext &SF = ECStack()->back();
@@ -1464,14 +1492,15 @@ void Interpreter::visitAtomicRMWInst(AtomicRMWInst &I){
     return;
   }
   CheckedStoreValueToMemory(NewVal,Ptr,I.getType());
-};
+}
 
 void Interpreter::visitInlineAsm(CallSite &CS, const std::string &asmstr){
   if(asmstr == "mfence"){ // Do nothing
+  }else if(asmstr == ""){ // Do nothing
   }else{
     throw std::logic_error("Unsupported inline assembly: " + asmstr);
   }
-};
+}
 
 //===----------------------------------------------------------------------===//
 //                 Miscellaneous Instruction Implementations
@@ -2115,7 +2144,7 @@ GenericValue Interpreter::executeBitCastInst(Value *SrcVal, Type *DstTy,
 GenericValue Interpreter::executeCastOperation(Instruction::CastOps opcode, Value *SrcVal,
                                                Type *Ty, ExecutionContext &SF){
   throw std::logic_error("Interpreter::executeCastOperation: Not implemented.");
-};
+}
 
 void Interpreter::visitTruncInst(TruncInst &I) {
   ExecutionContext &SF = ECStack()->back();
@@ -2585,7 +2614,7 @@ void Interpreter::callPthreadCreate(Function *F,
   Function *F_inner = (Function*)GVTOP(ArgVals[2]);
   std::vector<GenericValue> ArgVals_inner;
   if(F_inner->getArgumentList().size() == 1 &&
-     F_inner->arg_begin()->getType() == Type::getInt8PtrTy(getGlobalContext())){
+     F_inner->arg_begin()->getType() == Type::getInt8PtrTy(F->getContext())){
     ArgVals_inner.push_back(ArgVals[3]);
   }else if(F_inner->getArgumentList().size()){
     std::string _err;
@@ -2598,7 +2627,7 @@ void Interpreter::callPthreadCreate(Function *F,
 
   // Return to caller
   CurrentThread = caller_thread;
-};
+}
 
 void Interpreter::callPthreadJoin(Function *F,
                                   const std::vector<GenericValue> &ArgVals) {
@@ -2621,7 +2650,7 @@ void Interpreter::callPthreadJoin(Function *F,
   // Forward return value
   GenericValue *rvPtr = (GenericValue*)GVTOP(ArgVals[1]);
   if(rvPtr){
-    Type *ty = Type::getInt8PtrTy(getGlobalContext())->getPointerTo();
+    Type *ty = Type::getInt8PtrTy(F->getContext())->getPointerTo();
     if(!CheckedStoreValueToMemory(Threads[tid].RetVal,rvPtr,ty)) return;
   }
 
@@ -2629,21 +2658,21 @@ void Interpreter::callPthreadJoin(Function *F,
   GenericValue Result;
   Result.IntVal = APInt(F->getReturnType()->getIntegerBitWidth(),0);
   returnValueToCaller(F->getReturnType(),Result);
-};
+}
 
 void Interpreter::callPthreadSelf(Function *F,
                                   const std::vector<GenericValue> &ArgVals){
   GenericValue Result;
   Result.IntVal = APInt(F->getReturnType()->getIntegerBitWidth(),CurrentThread);
   returnValueToCaller(F->getReturnType(),Result);
-};
+}
 
 void Interpreter::callPthreadExit(Function *F,
                                   const std::vector<GenericValue> &ArgVals){
   TB.fence();
   while(ECStack()->size() > 1) ECStack()->pop_back();
-  popStackAndReturnValueToCaller(Type::getInt8PtrTy(getGlobalContext()),ArgVals[0]);
-};
+  popStackAndReturnValueToCaller(Type::getInt8PtrTy(F->getContext()),ArgVals[0]);
+}
 
 void Interpreter::callPthreadMutexInit(Function *F,
                                        const std::vector<GenericValue> &ArgVals){
@@ -2676,7 +2705,7 @@ void Interpreter::callPthreadMutexInit(Function *F,
 
   if(DryRun) return;
   PthreadMutexes[lck] = PthreadMutex();
-};
+}
 
 void Interpreter::callPthreadMutexLock(Function *F,
                                        const std::vector<GenericValue> &ArgVals){
@@ -2688,7 +2717,7 @@ void Interpreter::callPthreadMutexLock(Function *F,
     Result.IntVal = APInt(F->getReturnType()->getIntegerBitWidth(),0); // Success
     returnValueToCaller(F->getReturnType(),Result);
   }
-};
+}
 
 void Interpreter::callPthreadMutexLock(void *lck){
   if(!lck){
@@ -2698,18 +2727,22 @@ void Interpreter::callPthreadMutexLock(void *lck){
   }
 
   if(PthreadMutexes.count(lck) == 0){
-    TB.pthreads_error("pthread_mutex_lock called with uninitialized mutex.");
-    abort();
-    return;
+    if(conf.mutex_require_init){
+      TB.pthreads_error("pthread_mutex_lock called with uninitialized mutex.");
+      abort();
+      return;
+    }else if(!DryRun){
+      PthreadMutexes[lck] = PthreadMutex();
+    }
   }
 
-  assert(PthreadMutexes[lck].isUnlocked());
+  assert(PthreadMutexes.count(lck) == 0 || PthreadMutexes[lck].isUnlocked());
 
   TB.mutex_lock({lck,1}); // also acts as a fence
 
   if(DryRun) return;
   PthreadMutexes[lck].lock(CurrentThread);
-};
+}
 
 void Interpreter::callPthreadMutexTryLock(Function *F,
                                        const std::vector<GenericValue> &ArgVals){
@@ -2722,15 +2755,19 @@ void Interpreter::callPthreadMutexTryLock(Function *F,
   }
 
   if(PthreadMutexes.count(lck) == 0){
-    TB.pthreads_error("pthread_mutex_trylock called with uninitialized mutex.");
-    abort();
-    return;
+    if(conf.mutex_require_init){
+      TB.pthreads_error("pthread_mutex_trylock called with uninitialized mutex.");
+      abort();
+      return;
+    }else if(!DryRun){
+      PthreadMutexes[lck] = PthreadMutex();
+    }
   }
 
   GenericValue Result;
 
   TB.mutex_trylock({lck,1}); // also acts as a fence
-  if(PthreadMutexes[lck].isUnlocked()){
+  if(PthreadMutexes.count(lck) == 0 || PthreadMutexes[lck].isUnlocked()){
     Result.IntVal = APInt(F->getReturnType()->getIntegerBitWidth(),0); // Success
     returnValueToCaller(F->getReturnType(),Result);
 
@@ -2740,7 +2777,7 @@ void Interpreter::callPthreadMutexTryLock(Function *F,
     Result.IntVal = APInt(F->getReturnType()->getIntegerBitWidth(),EBUSY); // Failure
     returnValueToCaller(F->getReturnType(),Result);
   }
-};
+}
 
 void Interpreter::callPthreadMutexUnlock(Function *F,
                                          const std::vector<GenericValue> &ArgVals){
@@ -2753,12 +2790,16 @@ void Interpreter::callPthreadMutexUnlock(Function *F,
   }
 
   if(PthreadMutexes.count(lck) == 0){
-    TB.pthreads_error("pthread_mutex_unlock called with uninitialized mutex.");
-    abort();
-    return;
+    if(conf.mutex_require_init){
+      TB.pthreads_error("pthread_mutex_unlock called with uninitialized mutex.");
+      abort();
+      return;
+    }else if(!DryRun){
+      PthreadMutexes[lck] = PthreadMutex();
+    }
   }
 
-  if(PthreadMutexes[lck].owner != CurrentThread){
+  if(PthreadMutexes.count(lck) && PthreadMutexes[lck].owner != CurrentThread){
     TB.pthreads_error("pthread_mutex_unlock called with mutex not locked by the same process.");
     abort();
     return;
@@ -2777,7 +2818,7 @@ void Interpreter::callPthreadMutexUnlock(Function *F,
     TB.mark_available(p);
   }
   PthreadMutexes[lck].waiting.clear();
-};
+}
 
 void Interpreter::callPthreadMutexDestroy(Function *F,
                                           const std::vector<GenericValue> &ArgVals){
@@ -2790,12 +2831,16 @@ void Interpreter::callPthreadMutexDestroy(Function *F,
   }
 
   if(PthreadMutexes.count(lck) == 0){
-    TB.pthreads_error("pthread_mutex_destroy called with uninitialized mutex.");
-    abort();
-    return;
+    if(conf.mutex_require_init){
+      TB.pthreads_error("pthread_mutex_destroy called with uninitialized mutex.");
+      abort();
+      return;
+    }else if(!DryRun){
+      PthreadMutexes[lck] = PthreadMutex();
+    }
   }
 
-  if(PthreadMutexes[lck].isLocked()){
+  if(PthreadMutexes.count(lck) && PthreadMutexes[lck].isLocked()){
     TB.pthreads_error("pthread_mutex_destroy called with locked mutex.");
     abort();
     return;
@@ -2809,7 +2854,7 @@ void Interpreter::callPthreadMutexDestroy(Function *F,
 
   if(DryRun) return;
   PthreadMutexes.erase(lck);
-};
+}
 
 void Interpreter::callPthreadCondInit(Function *F,
                                       const std::vector<GenericValue> &ArgVals){
@@ -2836,7 +2881,7 @@ void Interpreter::callPthreadCondInit(Function *F,
   /* pthread_cond_init always returns 0 */
   Result.IntVal = APInt(F->getReturnType()->getIntegerBitWidth(),0);
   returnValueToCaller(F->getReturnType(),Result);
-};
+}
 
 void Interpreter::callPthreadCondSignal(Function *F,
                                         const std::vector<GenericValue> &ArgVals){
@@ -2857,7 +2902,7 @@ void Interpreter::callPthreadCondSignal(Function *F,
   /* pthread_cond_wait always returns 0 */
   Result.IntVal = APInt(F->getReturnType()->getIntegerBitWidth(),0);
   returnValueToCaller(F->getReturnType(),Result);
-};
+}
 
 void Interpreter::callPthreadCondBroadcast(Function *F,
                                            const std::vector<GenericValue> &ArgVals){
@@ -2878,7 +2923,7 @@ void Interpreter::callPthreadCondBroadcast(Function *F,
   /* pthread_cond_wait always returns 0 */
   Result.IntVal = APInt(F->getReturnType()->getIntegerBitWidth(),0);
   returnValueToCaller(F->getReturnType(),Result);
-};
+}
 
 void Interpreter::callPthreadCondWait(Function *F,
                                       const std::vector<GenericValue> &ArgVals){
@@ -2918,7 +2963,7 @@ void Interpreter::callPthreadCondWait(Function *F,
   PthreadMutexes[lck].waiting.clear();
 
   Threads[CurrentThread].pending_mutex_lock = lck;
-};
+}
 
 void Interpreter::callPthreadCondDestroy(Function *F,
                                          const std::vector<GenericValue> &ArgVals){
@@ -2940,7 +2985,7 @@ void Interpreter::callPthreadCondDestroy(Function *F,
     // Pthreads error
     abort();
   }
-};
+}
 
 void Interpreter::callNondetInt(Function *F, const std::vector<GenericValue> &ArgVals){
   std::uniform_int_distribution<int> distr(std::numeric_limits<int>::min(),
@@ -2949,7 +2994,7 @@ void Interpreter::callNondetInt(Function *F, const std::vector<GenericValue> &Ar
   Result.IntVal = APInt(F->getReturnType()->getIntegerBitWidth(),
                         distr(Threads[CurrentThread].RandEng),true);
   returnValueToCaller(F->getReturnType(),Result);
-};
+}
 
 void Interpreter::callAssume(Function *F, const std::vector<GenericValue> &ArgVals){
   bool cond = ArgVals[0].IntVal.getBoolValue();
@@ -2960,7 +3005,7 @@ void Interpreter::callAssume(Function *F, const std::vector<GenericValue> &ArgVa
         /* We are inside an atomic function call. Remove the top part
          * of the stack corresponding to that call.
          */
-        popStackAndReturnValueToCaller(Type::getVoidTy(getGlobalContext()), GenericValue());
+        popStackAndReturnValueToCaller(Type::getVoidTy(F->getContext()), GenericValue());
       }
       return;
     }
@@ -2971,7 +3016,7 @@ void Interpreter::callAssume(Function *F, const std::vector<GenericValue> &ArgVa
      * process.
      */
   }
-};
+}
 
 void Interpreter::callMalloc(Function *F,
                              const std::vector<GenericValue> &ArgVals){
@@ -2988,7 +3033,7 @@ void Interpreter::callMalloc(Function *F,
     AllocatedMemHeap.insert(Result.PointerVal);
     returnValueToCaller(F->getReturnType(),Result);
   }
-};
+}
 
 void Interpreter::callFree(Function *F,
                            const std::vector<GenericValue> &ArgVals){
@@ -3012,7 +3057,7 @@ void Interpreter::callFree(Function *F,
     abort();
     return;
   }
-};
+}
 
 void Interpreter::callAtexit(Function *F,
                              const std::vector<GenericValue> &ArgVals){
@@ -3020,7 +3065,7 @@ void Interpreter::callAtexit(Function *F,
   GenericValue Result;
   Result.IntVal = APInt(F->getReturnType()->getIntegerBitWidth(),0);
   returnValueToCaller(F->getReturnType(),Result);
-};
+}
 
 void Interpreter::callAssertFail(Function *F,
                                  const std::vector<GenericValue> &ArgVals){
@@ -3032,7 +3077,7 @@ void Interpreter::callAssertFail(Function *F,
   }
   TB.assertion_error(err);
   abort();
-};
+}
 
 //===----------------------------------------------------------------------===//
 // callFunction - Execute the specified function...
@@ -3145,7 +3190,7 @@ void Interpreter::callFunction(Function *F,
   }
 
   // Get pointers to first LLVM BB & Instruction in function.
-  StackFrame.CurBB     = F->begin();
+  StackFrame.CurBB     = &F->front();
   StackFrame.CurInst   = StackFrame.CurBB->begin();
 
   // Run through the function arguments and initialize their values...
@@ -3156,8 +3201,9 @@ void Interpreter::callFunction(Function *F,
   // Handle non-varargs arguments...
   unsigned i = 0;
   for (Function::arg_iterator AI = F->arg_begin(), E = F->arg_end();
-       AI != E; ++AI, ++i)
-    SetValue(AI, ArgVals[i], StackFrame);
+       AI != E; ++AI, ++i){
+    SetValue(&*AI, ArgVals[i], StackFrame);
+  }
 
   // Handle varargs arguments...
   StackFrame.VarArgs.assign(ArgVals.begin()+i, ArgVals.end());
@@ -3177,7 +3223,7 @@ bool Interpreter::isInlineAsm(CallSite &CS, std::string *asmstr){
     llvm::CallInst *CI = cast<llvm::CallInst>(CS.getInstruction());
     if(CI){
       if(CI->isInlineAsm()){
-        llvm::InlineAsm *IA = dyn_cast<llvm::InlineAsm>(CI->getArgOperand(0));
+        llvm::InlineAsm *IA = llvm::dyn_cast<llvm::InlineAsm>(CI->getCalledValue());
         assert(IA);
         *asmstr = IA->getAsmString();
         stripws(*asmstr);
@@ -3186,7 +3232,7 @@ bool Interpreter::isInlineAsm(CallSite &CS, std::string *asmstr){
     }
   }
   return false;
-};
+}
 
 bool Interpreter::isUnknownIntrinsic(Instruction &I){
   if(isa<CallInst>(I)){
@@ -3201,7 +3247,7 @@ bool Interpreter::isUnknownIntrinsic(Instruction &I){
     }
   }
   return false;
-};
+}
 
 bool Interpreter::isPthreadJoin(Instruction &I, int *tid){
   if(!isa<CallInst>(I)) return false;
@@ -3212,7 +3258,7 @@ bool Interpreter::isPthreadJoin(Instruction &I, int *tid){
     getOperandValue(*CS.arg_begin(), ECStack()->back());
   *tid = gv_tid.IntVal.getLimitedValue(std::numeric_limits<int>::max());
   return true;
-};
+}
 
 bool Interpreter::isPthreadMutexLock(Instruction &I, GenericValue **ptr){
   if(Threads[CurrentThread].pending_mutex_lock){
@@ -3225,7 +3271,7 @@ bool Interpreter::isPthreadMutexLock(Instruction &I, GenericValue **ptr){
   if(!F || F->getName() != "pthread_mutex_lock") return false;
   *ptr = (GenericValue*)GVTOP(getOperandValue(*CS.arg_begin(),ECStack()->back()));
   return true;
-};
+}
 
 bool Interpreter::checkRefuse(Instruction &I){
   {
@@ -3260,30 +3306,30 @@ bool Interpreter::checkRefuse(Instruction &I){
     }
   }
   return false;
-};
+}
 
 void Interpreter::terminate(Type *RetTy, GenericValue Result){
   if(CurrentThread != 0){
-    assert(RetTy == Type::getInt8PtrTy(getGlobalContext()));
+    assert(RetTy == Type::getInt8PtrTy(RetTy->getContext()));
     Threads[CurrentThread].RetVal = Result;
   }
   for(int p : Threads[CurrentThread].AwaitingJoin){
     TB.mark_available(p);
   }
-};
+}
 
 void Interpreter::clearAllStacks(){
   for(unsigned i = 0; i < Threads.size(); ++i){
     Threads[i].ECStack.clear();
   }
-};
+}
 
 void Interpreter::abort(){
   for(unsigned i = 0; i < Threads.size(); ++i){
     TB.mark_unavailable(i);
   }
   clearAllStacks();
-};
+}
 
 void Interpreter::run() {
   int aux;

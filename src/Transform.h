@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Carl Leonardsson
+/* Copyright (C) 2014-2017 Carl Leonardsson
  *
  * This file is part of Nidhugg.
  *
@@ -57,7 +57,7 @@ namespace Transform {
    */
   bool transform(llvm::Module &mod, const Configuration &conf);
 
-};
+}
 
 #endif
 

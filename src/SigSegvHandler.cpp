@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Carl Leonardsson
+/* Copyright (C) 2014-2017 Carl Leonardsson
  *
  * This file is part of Nidhugg.
  *
@@ -42,7 +42,7 @@ namespace SigSegvHandler {
       env_is_enabled = false;
       siglongjmp(env,1);
     }
-  };
+  }
 
   void setup_signal_handler(){
     struct sigaction act;
@@ -52,19 +52,19 @@ namespace SigSegvHandler {
     if(sigaction(SIGSEGV,&act,&original_action)){
       throw std::logic_error("Failed to setup signal handler.");
     }
-  };
+  }
 
   void reset_signal_handler(){
     sigaction(SIGSEGV,&original_action,0);
-  };
+  }
 
   bool setenv(){
     env_is_enabled = true;
     return sigsetjmp(env,1);
-  };
+  }
 
   void unsetenv(){
     env_is_enabled = false;
-  };
+  }
 
-};
+}

@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Carl Leonardsson
+/* Copyright (C) 2014-2017 Carl Leonardsson
  *
  * This file is part of Nidhugg.
  *
@@ -42,6 +42,6 @@ namespace Debug {
    */
   llvm::raw_ostream &warn(const std::string &wid);
 
-};
+}
 
 #endif

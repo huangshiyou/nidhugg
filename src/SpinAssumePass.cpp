@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Carl Leonardsson
+/* Copyright (C) 2014-2017 Carl Leonardsson
  *
  * This file is part of Nidhugg.
  *
@@ -61,7 +61,7 @@ void SpinAssumePass::getAnalysisUsage(llvm::AnalysisUsage &AU) const{
   AU.addRequired<llvm::LLVM_DOMINATOR_TREE_PASS>();
   AU.addRequired<DeclareAssumePass>();
   AU.addPreserved<DeclareAssumePass>();
-};
+}
 
 bool DeclareAssumePass::runOnModule(llvm::Module &M){
   bool modified_M = false;
@@ -70,19 +70,19 @@ bool DeclareAssumePass::runOnModule(llvm::Module &M){
   if(!F_assume){
     llvm::FunctionType *assumeTy;
     {
-      llvm::Type *voidTy = llvm::Type::getVoidTy(llvm::getGlobalContext());
-      llvm::Type *i1Ty = llvm::Type::getInt1Ty(llvm::getGlobalContext());
+      llvm::Type *voidTy = llvm::Type::getVoidTy(M.getContext());
+      llvm::Type *i1Ty = llvm::Type::getInt1Ty(M.getContext());
       assumeTy = llvm::FunctionType::get(voidTy,{i1Ty},false);
     }
     llvm::AttributeSet assumeAttrs =
-      llvm::AttributeSet::get(llvm::getGlobalContext(),llvm::AttributeSet::FunctionIndex,
+      llvm::AttributeSet::get(M.getContext(),llvm::AttributeSet::FunctionIndex,
                               std::vector<llvm::Attribute::AttrKind>({llvm::Attribute::NoUnwind}));
     F_assume = llvm::dyn_cast<llvm::Function>(M.getOrInsertFunction("__VERIFIER_assume",assumeTy,assumeAttrs));
     assert(F_assume);
     modified_M = true;
   }
   return modified_M;
-};
+}
 
 bool SpinAssumePass::is_assume(llvm::Instruction &I) const {
   llvm::CallInst *C = llvm::dyn_cast<llvm::CallInst>(&I);
@@ -90,7 +90,7 @@ bool SpinAssumePass::is_assume(llvm::Instruction &I) const {
   llvm::CallSite CS(C);
   llvm::Function *F = CS.getCalledFunction();
   return F && F->getName().str() == "__VERIFIER_assume";
-};
+}
 
 bool SpinAssumePass::is_spin(const llvm::Loop *l) const{
   for(auto B_it = l->block_begin(); B_it != l->block_end(); ++B_it){
@@ -109,7 +109,7 @@ bool SpinAssumePass::is_spin(const llvm::Loop *l) const{
     }
   }
   return true;
-};
+}
 
 void SpinAssumePass::remove_disconnected(llvm::Loop *l){
   // Traverse l and all its ancestor loops
@@ -145,7 +145,7 @@ void SpinAssumePass::remove_disconnected(llvm::Loop *l){
     }
     l = l->getParentLoop();
   }
-};
+}
 
 bool SpinAssumePass::assumify_loop(llvm::Loop *l,llvm::LPPassManager &LPM){
   llvm::BasicBlock *EB = l->getExitingBlock();
@@ -195,18 +195,22 @@ bool SpinAssumePass::assumify_loop(llvm::Loop *l,llvm::LPPassManager &LPM){
   I->setMetadata("dbg",MD);
   remove_disconnected(l);
   return true;
-};
+}
 
 bool SpinAssumePass::runOnLoop(llvm::Loop *L, llvm::LPPassManager &LPM){
   bool modified = false;
   if(is_spin(L)){
     if(assumify_loop(L,LPM)){
+#ifdef HAVE_LLVM_LOOPINFO_MARK_AS_REMOVED
+      LPM.getAnalysis<llvm::LoopInfoWrapperPass>().getLoopInfo().markAsRemoved(L);
+#else
       LPM.deleteLoopFromQueue(L);
+#endif
       modified = true;
     }
   }
   return modified;
-};
+}
 
 char SpinAssumePass::ID = 0;
 static llvm::RegisterPass<SpinAssumePass> X("spin-assume","Replace spin loops with __VERIFIER_assumes.");

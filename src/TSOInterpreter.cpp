@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Carl Leonardsson
+/* Copyright (C) 2014-2017 Carl Leonardsson
  *
  * This file is part of Nidhugg.
  *
@@ -34,10 +34,10 @@ TSOInterpreter::TSOInterpreter(llvm::Module *M, TSOTraceBuilder &TB,
                                const Configuration &conf)
   : Interpreter(M,TB,conf) {
   tso_threads.push_back(TSOThread());
-};
+}
 
 TSOInterpreter::~TSOInterpreter(){
-};
+}
 
 llvm::ExecutionEngine *TSOInterpreter::create(llvm::Module *M, TSOTraceBuilder &TB,
                                               const Configuration &conf,
@@ -48,15 +48,32 @@ llvm::ExecutionEngine *TSOInterpreter::create(llvm::Module *M, TSOTraceBuilder &
     if(ErrorStr) *ErrorStr = EC.message();
     return 0;
   }
-#else
+#elif defined LLVM_MODULE_MATERIALIZE_ALL_PERMANENTLY_BOOL_STRPTR
   if (M->MaterializeAllPermanently(ErrorStr)){
     // We got an error, just return 0
+    return 0;
+  }
+#elif defined LLVM_MODULE_MATERIALIZE_LLVM_ALL_ERROR
+  if (llvm::Error Err = M->materializeAll()) {
+    std::string Msg;
+    handleAllErrors(std::move(Err), [&](llvm::ErrorInfoBase &EIB) {
+      Msg = EIB.message();
+    });
+    if (ErrorStr)
+      *ErrorStr = Msg;
+    // We got an error, just return 0
+    return nullptr;
+  }
+#else
+  if(std::error_code EC = M->materializeAll()){
+    // We got an error, just return 0
+    if(ErrorStr) *ErrorStr = EC.message();
     return 0;
   }
 #endif
 
   return new TSOInterpreter(M,TB,conf);
-};
+}
 
 void TSOInterpreter::runAux(int proc, int aux){
   /* Perform an update from store buffer to memory. */
@@ -98,12 +115,12 @@ void TSOInterpreter::runAux(int proc, int aux){
       }
     }
   }
-};
+}
 
 int TSOInterpreter::newThread(const CPid &cpid){
   tso_threads.push_back(TSOThread());
   return Interpreter::newThread(cpid);
-};
+}
 
 bool TSOInterpreter::isFence(llvm::Instruction &I){
   if(llvm::isa<llvm::CallInst>(I)){
@@ -120,32 +137,32 @@ bool TSOInterpreter::isFence(llvm::Instruction &I){
       if(isInlineAsm(CS,&asmstr) && asmstr == "mfence") return true;
     }
   }else if(llvm::isa<llvm::StoreInst>(I)){
-    return static_cast<llvm::StoreInst&>(I).getOrdering() == llvm::SequentiallyConsistent;
+    return static_cast<llvm::StoreInst&>(I).getOrdering() == LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent;
   }else if(llvm::isa<llvm::FenceInst>(I)){
-    return static_cast<llvm::FenceInst&>(I).getOrdering() == llvm::SequentiallyConsistent;
+    return static_cast<llvm::FenceInst&>(I).getOrdering() == LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent;
   }else if(llvm::isa<llvm::AtomicCmpXchgInst>(I)){
 #ifdef LLVM_CMPXCHG_SEPARATE_SUCCESS_FAILURE_ORDERING
     llvm::AtomicOrdering succ = static_cast<llvm::AtomicCmpXchgInst&>(I).getSuccessOrdering();
     llvm::AtomicOrdering fail = static_cast<llvm::AtomicCmpXchgInst&>(I).getFailureOrdering();
-    if(succ != llvm::SequentiallyConsistent || fail != llvm::SequentiallyConsistent){
+    if(succ != LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent || fail != LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent){
 #else
-    if(static_cast<llvm::AtomicCmpXchgInst&>(I).getOrdering() != llvm::SequentiallyConsistent){
+    if(static_cast<llvm::AtomicCmpXchgInst&>(I).getOrdering() != LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent){
 #endif
       Debug::warn("TSOInterpreter::isFence::cmpxchg") << "WARNING: Non-sequentially consistent CMPXCHG instruction interpreted as sequentially consistent.\n";
     }
     return true;
   }else if(llvm::isa<llvm::AtomicRMWInst>(I)){
-    if(static_cast<llvm::AtomicRMWInst&>(I).getOrdering() != llvm::SequentiallyConsistent){
+    if(static_cast<llvm::AtomicRMWInst&>(I).getOrdering() != LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent){
       Debug::warn("TSOInterpreter::isFence::rmw") << "WARNING: Non-sequentially consistent RMW instruction interpreted as sequentially consistent.\n";
     }
     return true;
   }
   return false;
-};
+}
 
 void TSOInterpreter::terminate(llvm::Type *RetTy, llvm::GenericValue Result){
   if(CurrentThread != 0){
-    assert(RetTy == llvm::Type::getInt8PtrTy(llvm::getGlobalContext()));
+    assert(RetTy == llvm::Type::getInt8PtrTy(RetTy->getContext()));
     Threads[CurrentThread].RetVal = Result;
   }
   if(tso_threads[CurrentThread].store_buffer.empty()){
@@ -153,7 +170,7 @@ void TSOInterpreter::terminate(llvm::Type *RetTy, llvm::GenericValue Result){
       TB.mark_available(p);
     }
   }
-};
+}
 
 bool TSOInterpreter::checkRefuse(llvm::Instruction &I){
   int tid;
@@ -204,7 +221,7 @@ bool TSOInterpreter::checkRefuse(llvm::Instruction &I){
     }
   }
   return Interpreter::checkRefuse(I);
-};
+}
 
 void TSOInterpreter::visitLoadInst(llvm::LoadInst &I){
   llvm::ExecutionContext &SF = ECStack()->back();
@@ -235,14 +252,14 @@ void TSOInterpreter::visitLoadInst(llvm::LoadInst &I){
   /* Load from memory */
   if(!CheckedLoadValueFromMemory(Result, Ptr, I.getType())) return;
   SetValue(&I, Result, SF);
-};
+}
 
 void TSOInterpreter::visitStoreInst(llvm::StoreInst &I){
   llvm::ExecutionContext &SF = ECStack()->back();
   llvm::GenericValue Val = getOperandValue(I.getOperand(0), SF);
   llvm::GenericValue *Ptr = (llvm::GenericValue *)GVTOP(getOperandValue(I.getPointerOperand(), SF));
 
-  if(I.getOrdering() == llvm::SequentiallyConsistent ||
+  if(I.getOrdering() == LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent ||
      0 <= AtomicFunctionCall){
     /* Atomic store */
     assert(tso_threads[CurrentThread].store_buffer.empty());
@@ -261,28 +278,29 @@ void TSOInterpreter::visitStoreInst(llvm::StoreInst &I){
     }
     tso_threads[CurrentThread].store_buffer.push_back(GetMBlock(Ptr, I.getOperand(0)->getType(), Val));
   }
-};
+}
 
 void TSOInterpreter::visitFenceInst(llvm::FenceInst &I){
-  if(I.getOrdering() == llvm::SequentiallyConsistent){
+  if(I.getOrdering() == LLVM_ATOMIC_ORDERING_SCOPE::SequentiallyConsistent){
     TB.fence();
   }
-};
+}
 
 void TSOInterpreter::visitAtomicCmpXchgInst(llvm::AtomicCmpXchgInst &I){
   assert(tso_threads[CurrentThread].store_buffer.empty());
   Interpreter::visitAtomicCmpXchgInst(I);
-};
+}
 
 void TSOInterpreter::visitAtomicRMWInst(llvm::AtomicRMWInst &I){
   assert(tso_threads[CurrentThread].store_buffer.empty());
   Interpreter::visitAtomicRMWInst(I);
-};
+}
 
 void TSOInterpreter::visitInlineAsm(llvm::CallSite &CS, const std::string &asmstr){
   if(asmstr == "mfence"){
     TB.fence();
+  }else if(asmstr == ""){ // Do nothing
   }else{
     throw std::logic_error("Unsupported inline assembly: "+asmstr);
   }
-};
+}
